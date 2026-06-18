@@ -1,93 +1,85 @@
 name: AWS CI/CD - ECS Fargate
+
 on:
-push:
-branches:
-- main
-paths:
-- "app/**"
-- ".github/workflows/aws-ci-cd.yml"
-workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - ".github/workflows/aws-ci-cd.yml"
+  workflow_dispatch:
+
 env:
-AWS_REGION: sa-east-1
-ECR_REPOSITORY: projeto2-cicd-aws
-ECS_CLUSTER: projeto2-cicd-aws-cluster
-ECS_SERVICE: projeto2-cicd-aws-service
-ECS_TASK_FAMILY: projeto2-cicd-aws-task
-CONTAINER_NAME: projeto2-cicd-aws
+  AWS_REGION: sa-east-1
+  ECR_REPOSITORY: projeto2-cicd-aws
+  ECS_CLUSTER: projeto2-cicd-aws-cluster
+  ECS_SERVICE: projeto2-cicd-aws-service
+  ECS_TASK_FAMILY: projeto2-cicd-aws-task
+  CONTAINER_NAME: projeto2-cicd-aws
+
 jobs:
-build-test-deploy:
-name: Build, test and deploy to AWS ECS
-runs-on: ubuntu-latest
-steps:
-- name: Baixar codigo
-uses: actions/checkout@v4
-- name: Configurar Node.js
-uses: actions/setup-node@v4
+  build-test-deploy:
+    name: Build, test and deploy to AWS ECS
+    runs-on: ubuntu-latest
 
-Projeto 2 - Pipeline de CI/CD com Deploy Automatizado | AWS e Azure
+    steps:
+      - name: Baixar codigo
+        uses: actions/checkout@v4
 
-Roteiro completo do zero | Página 16
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-with:
-node-version: 20
-- name: Instalar dependencias
-working-directory: ./app
-run: npm install
-- name: Executar testes
-working-directory: ./app
-run: npm test
-- name: Configurar credenciais AWS
-uses: aws-actions/configure-aws-credentials@v4
-with:
-aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-aws-region: ${{ env.AWS_REGION }}
-- name: Login no Amazon ECR
-id: login-ecr
-uses: aws-actions/amazon-ecr-login@v2
-- name: Build e push da imagem Docker
-id: build-image
-env:
-ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-IMAGE_TAG: ${{ github.sha }}
-run: |
-IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-IMAGE_LATEST=$ECR_REGISTRY/$ECR_REPOSITORY:latest
-docker build -t $IMAGE_URI ./app
-docker tag $IMAGE_URI $IMAGE_LATEST
-docker push $IMAGE_URI
-docker push $IMAGE_LATEST
-echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-- name: Atualizar ECS com nova imagem
-env:
-IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
-run: |
-TASK_DEFINITION=$(aws ecs describe-task-definition \
---task-definition "$ECS_TASK_FAMILY" \
---query "taskDefinition")
-NEW_TASK_DEFINITION=$(echo "$TASK_DEFINITION" | jq \
---arg IMAGE "$IMAGE_URI" \
---arg NAME "$CONTAINER_NAME" '
-.containerDefinitions = (
-.containerDefinitions
-| map(if .name == $NAME then .image = $IMAGE else . end)
-)
-| del(
-.taskDefinitionArn,
-.revision,
-.status,
-.requiresAttributes,
-.compatibilities,
-.registeredAt,
-.registeredBy
-)')
-NEW_TASK_INFO=$(aws ecs register-task-definition \
---cli-input-json "$NEW_TASK_DEFINITION")
-NEW_TASK_ARN=$(echo "$NEW_TASK_INFO" | jq -r '.taskDefinition.taskDefinitionArn')
-aws ecs update-service \
---cluster "$ECS_CLUSTER" \
---service "$ECS_SERVICE" \
---task-definition "$NEW_TASK_ARN"
-aws ecs wait services-stable \
---cluster "$ECS_CLUSTER" \
---services "$ECS_SERVICE"
+      - name: Instalar dependencias
+        working-directory: ./app
+        run: npm install
+
+      - name: Executar testes
+        working-directory: ./app
+        run: npm test
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build e push da imagem Docker
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Baixar task definition atual
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition $ECS_TASK_FAMILY \
+            --query taskDefinition > task-definition.json
+
+      - name: Renderizar nova task definition
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy no ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
